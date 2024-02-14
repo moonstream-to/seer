@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+option go_package = "./blockchain";
+
+
+// Represents a single transaction within a block
+message SingleTransaction {
+  string hash = 1;
+  int64 block_number = 2;
+  string from_address = 3;
+  string to_address = 4;
+  string gas = 5; // using string to handle big numeric values
+  string gas_price = 6;
+  string max_fee_per_gas = 7;
+  string max_priority_fee_per_gas = 8;
+  string input = 9; // could be a long text
+  string nonce = 10;
+  int64 transaction_index = 11;
+  int32 transaction_type = 12;
+  string value = 13; // using string to handle big numeric values
+  int64 indexed_at = 14; // using int64 to represent timestamp
+  int64 block_timestamp = 15; // using int64 to represent timestam
+}
+
+// Represents a single blockchain block
+message Block {
+  int64 block_number = 1;
+  int64 difficulty = 2;
+  string extra_data = 3;
+  int64 gas_limit = 4;
+  int64 gas_used = 5;
+  string base_fee_per_gas = 6; // using string to handle big numeric values
+  string hash = 7;
+  string logs_bloom = 8;
+  string miner = 9;
+  string nonce = 10;
+  string parent_hash = 11;
+  string receipt_root = 12;
+  string uncles = 13;
+  int32 size = 14;
+  string state_root = 15;
+  int64 timestamp = 16;
+  string total_difficulty = 17;
+  string transactions_root = 18;
+  int64 indexed_at = 19; // using int64 to represent timestamp
+  repeated SingleTransaction transactions = 20;
+}
+
+
+message EventLog {
+  string address = 1; // The address of the contract that generated the log
+  repeated string topics = 2; // Topics are indexed parameters during log generation
+  string data = 3; // The data field from the log
+  int64 block_number = 4; // The block number where this log was in
+  string transaction_hash = 5; // The hash of the transaction that generated this log
+  string block_hash = 6; // The hash of the block where this log was in
+  bool removed = 7; // True if the log was reverted due to a chain reorganization
+  int64 log_index = 8; // The index of the log in the block
+  int64 transaction_index = 9; // The index of the transaction in the block
+}
+
+
