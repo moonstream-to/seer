@@ -16,7 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/moonstream-to/seer/blockchain"
+	seer_blockchain "github.com/moonstream-to/seer/blockchain"
 	"github.com/moonstream-to/seer/crawler"
 	"github.com/moonstream-to/seer/evm"
 	"github.com/moonstream-to/seer/indexer"
@@ -217,8 +217,8 @@ func CreateStarknetCommand() *cobra.Command {
 }
 
 func CreateCrawlerCommand() *cobra.Command {
-	var startBlock, endBlock, batchSize, confirmations int64
-	var timeout, threads int
+	var startBlock, endBlock, confirmations int64
+	var timeout, threads, protoSizeLimit, protoTimeLimit int
 	var chain, baseDir string
 	var force bool
 
@@ -247,7 +247,7 @@ func CreateCrawlerCommand() *cobra.Command {
 
 			indexer.InitDBConnection()
 
-			newCrawler, crawlerError := crawler.NewCrawler(chain, startBlock, endBlock, batchSize, confirmations, timeout, baseDir, force)
+			newCrawler, crawlerError := crawler.NewCrawler(chain, startBlock, endBlock, confirmations, timeout, baseDir, force, protoSizeLimit, protoTimeLimit)
 			if crawlerError != nil {
 				return crawlerError
 			}
@@ -274,10 +274,11 @@ func CreateCrawlerCommand() *cobra.Command {
 	crawlerCmd.Flags().Int64Var(&endBlock, "end-block", 0, "The block number to end crawling at (default: endless)")
 	crawlerCmd.Flags().IntVar(&timeout, "timeout", 30, "The timeout for the crawler in seconds (default: 30)")
 	crawlerCmd.Flags().IntVar(&threads, "threads", 1, "Number of go-routines for concurrent crawling (default: 1)")
-	crawlerCmd.Flags().Int64Var(&batchSize, "batch-size", 10, "The number of blocks to crawl in each batch (default: 10)")
 	crawlerCmd.Flags().Int64Var(&confirmations, "confirmations", 10, "The number of confirmations to consider for block finality (default: 10)")
 	crawlerCmd.Flags().StringVar(&baseDir, "base-dir", "", "The base directory to store the crawled data (default: '')")
 	crawlerCmd.Flags().BoolVar(&force, "force", false, "Set this flag to force the crawler start from the specified block, otherwise it checks database latest indexed block number (default: false)")
+	crawlerCmd.Flags().IntVar(&protoSizeLimit, "proto-size-limit", 100, "Proto file size limit in Mb (default: 100Mb)")
+	crawlerCmd.Flags().IntVar(&protoTimeLimit, "proto-time-limit", 5, "Proto time limit in minutes (default: 5min)")
 
 	return crawlerCmd
 }
@@ -364,8 +365,8 @@ func CreateInspectorCommand() *cobra.Command {
 		Short: "Inspect storage and database consistency",
 	}
 
-	var chain, baseDir, delim, returnFunc, batch, target string
-	var timeout, row int
+	var chain, baseDir, delim, returnFunc, batch string
+	var timeout int
 
 	readCommand := &cobra.Command{
 		Use:   "read",
@@ -381,12 +382,6 @@ func CreateInspectorCommand() *cobra.Command {
 				return crawlerErr
 			}
 
-			if target == "" {
-				return errors.New("target is required via --target")
-			} else if target != "blocks" && target != "logs" && target != "transactions" {
-				return errors.New("target should be: blocks or logs or transactions")
-			}
-
 			if batch == "" {
 				return errors.New("batch is required via --batch")
 			}
@@ -400,25 +395,28 @@ func CreateInspectorCommand() *cobra.Command {
 				return newStorageErr
 			}
 
-			targetFile := fmt.Sprintf("%s.proto", target)
-			targetFilePath := filepath.Join(basePath, batch, targetFile)
+			targetFilePath := filepath.Join(basePath, batch, "data.proto")
 			rawData, readErr := storageInstance.Read(targetFilePath)
 			if readErr != nil {
 				return readErr
 			}
 
-			rawDataRowsNum := len(rawData)
-			if rawDataRowsNum-1 < row {
-				log.Printf("File %s contains %d rows, specified row %d not exists", targetFilePath, rawDataRowsNum, row)
-				return nil
-			}
-
-			_, cleintErr := blockchain.NewClient(chain, crawler.BlockchainURLs[chain], timeout)
+			client, cleintErr := seer_blockchain.NewClient(chain, crawler.BlockchainURLs[chain], timeout)
 			if cleintErr != nil {
 				return cleintErr
 			}
 
-			// TODO(kompotkot): Finish proto parsing
+			output, decErr := client.DecodeProtoEntireBlock(&rawData)
+			if decErr != nil {
+				return decErr
+			}
+
+			jsonOutput, marErr := json.Marshal(output)
+			if marErr != nil {
+				return marErr
+			}
+
+			fmt.Println(string(jsonOutput))
 
 			return nil
 		},
@@ -427,8 +425,6 @@ func CreateInspectorCommand() *cobra.Command {
 	readCommand.Flags().StringVar(&chain, "chain", "ethereum", "The blockchain to crawl (default: ethereum)")
 	readCommand.Flags().StringVar(&baseDir, "base-dir", "", "The base directory to store the crawled data (default: '')")
 	readCommand.Flags().StringVar(&batch, "batch", "", "What batch to read")
-	readCommand.Flags().StringVar(&target, "target", "", "What to read: blocks, logs or transactions")
-	readCommand.Flags().IntVar(&row, "row", 0, "Row to read (default: 0)")
 
 	var storageVerify bool
 

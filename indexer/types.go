@@ -44,8 +44,8 @@ type TransactionIndex struct {
 	ToAddress        string
 	RowID            uint64
 	Selector         string
-	TransactionHash  string // TODO: Rename this to Hash
-	TransactionIndex uint64 // TODO: Rename this to Index
+	TransactionHash  string
+	TransactionIndex uint64
 	Type             uint64
 	Path             string
 }

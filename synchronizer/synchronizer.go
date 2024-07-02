@@ -369,29 +369,31 @@ func (d *Synchronizer) SyncCycle(customerDbUriFlag string) (bool, error) {
 						RowIds: rowIds,
 					})
 				}
-				// Read all rowIds for each path
-				encodedEvents, err := d.StorageInstance.ReadBatch(eventsReadMap)
 
-				if err != nil {
-					fmt.Println("Error reading events: ", err)
-					errChan <- fmt.Errorf("error reading events for customer %s: %w", update.CustomerID, err)
-					return
-				}
+				var decodedEvents []indexer.EventLabel
 
-				// Union all keys values into a single slice
-				var all_events []string
+				for _, item := range eventsReadMap {
 
-				for _, data := range encodedEvents {
-					all_events = append(all_events, data...)
-				}
+					if crawler.SEER_CRAWLER_DEBUG {
+						log.Printf("Key: %s", item.Key)
+					}
 
-				// Decode the events using ABIs
-				decodedEvents, err := d.Client.DecodeProtoEventsToLabels(all_events, update.BlocksCache, update.Abis)
+					// Read events from storage
+					rawEvents, readErr := d.StorageInstance.Read(item.Key)
+					if readErr != nil {
+						errChan <- fmt.Errorf("error reading events for customer %s: %w", update.CustomerID, readErr)
+						return
+					}
 
-				if err != nil {
-					fmt.Println("Error decoding events: ", err)
-					errChan <- fmt.Errorf("error decoding events for customer %s: %w", update.CustomerID, err)
-					return
+					// Decode the events using ABIs
+					decodedEventsPack, decErr := d.Client.DecodeProtoEventsToLabels(&rawEvents, update.BlocksCache, update.Abis)
+					if decErr != nil {
+						fmt.Println("Error decoding events: ", decErr)
+						errChan <- fmt.Errorf("error decoding events for customer %s: %w", update.CustomerID, decErr)
+						return
+					}
+
+					decodedEvents = append(decodedEvents, decodedEventsPack...)
 				}
 
 				// Write events to user RDS

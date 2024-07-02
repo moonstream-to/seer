@@ -2,8 +2,10 @@ package storage
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -17,7 +19,7 @@ func NewFileStorage(basePath string) *FileStorage {
 	return &FileStorage{BasePath: basePath}
 }
 
-func (fs *FileStorage) Save(batchDir, filename string, data []string) error {
+func (fs *FileStorage) Save(batchDir, filename string, bf bytes.Buffer) error {
 	keyDir := filepath.Join(fs.BasePath, batchDir)
 	key := filepath.Join(keyDir, filename)
 
@@ -35,38 +37,31 @@ func (fs *FileStorage) Save(batchDir, filename string, data []string) error {
 
 	defer file.Close()
 
-	for _, item := range data {
-		_, err := file.WriteString(item + "\n")
-		if err != nil {
-			return err
-		}
+	_, err = io.Copy(file, &bf)
+
+	if err != nil {
+		log.Fatalf("Failed to write to file %s: %v", key, err)
 	}
 
 	return nil
 
 }
 
-func (fs *FileStorage) Read(key string) ([]string, error) {
+func (fs *FileStorage) Read(key string) (bytes.Buffer, error) {
 
 	file, err := os.Open(key)
 	if err != nil {
-		return nil, err
+		return bytes.Buffer{}, fmt.Errorf("failed to open file %s: %v", key, err)
 	}
 	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-
-	var result []string
-
-	for scanner.Scan() {
-		result = append(result, scanner.Text())
+	var bf bytes.Buffer
+	_, err = io.Copy(&bf, file)
+	if err != nil {
+		return bytes.Buffer{}, fmt.Errorf("failed to read file %s: %v", key, err)
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	return result, nil
+	return bf, nil
 }
 
 func (fs *FileStorage) ReadBatch(readItems []ReadItem) (map[string][]string, error) {
@@ -83,7 +78,12 @@ func (fs *FileStorage) ReadBatch(readItems []ReadItem) (map[string][]string, err
 			if err != nil {
 				return nil, err
 			}
-			result[item.Key] = append(result[item.Key], data...)
+			lines := bytes.Split(data.Bytes(), []byte{'\n'})
+			for _, line := range lines {
+				if len(line) > 0 {
+					result[item.Key] = append(result[item.Key], string(line))
+				}
+			}
 		} else {
 			file, err := os.Open(item.Key)
 			if err != nil {

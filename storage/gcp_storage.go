@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -28,7 +29,7 @@ func NewGCSStorage(client *storage.Client, basePath string) *GCS {
 	}
 }
 
-func (g *GCS) Save(batchDir, filename string, data []string) error {
+func (g *GCS) Save(batchDir, filename string, bf bytes.Buffer) error {
 	key := filepath.Join(g.BasePath, batchDir, filename)
 
 	ctx := context.Background()
@@ -37,28 +38,19 @@ func (g *GCS) Save(batchDir, filename string, data []string) error {
 
 	obj := bucket.Object(key)
 
-	// Write the data as a string
-	w := obj.NewWriter(ctx)
-
-	for _, item := range data {
-		if _, err := w.Write([]byte(item + "\n")); err != nil {
-			return fmt.Errorf("failed to write object to bucket: %v", err)
-		}
-	}
-
 	wc := obj.NewWriter(ctx)
 	wc.Metadata = map[string]string{
-		"rows": fmt.Sprintf("%d", len(data)),
+		"encoder": "varint-size-delimited",
 	}
 
-	if err := w.Close(); err != nil {
-		return fmt.Errorf("failed to close writer: %v", err)
+	if _, err := io.Copy(wc, &bf); err != nil {
+		return fmt.Errorf("failed to write object to bucket: %v", err)
 	}
 
 	return nil
 }
 
-func (g *GCS) Read(key string) ([]string, error) {
+func (g *GCS) Read(key string) (bytes.Buffer, error) {
 
 	ctx := context.Background()
 
@@ -67,25 +59,19 @@ func (g *GCS) Read(key string) ([]string, error) {
 	obj := bucket.Object(key)
 
 	r, err := obj.NewReader(ctx)
-
 	if err != nil {
-		return nil, fmt.Errorf("failed to create reader: %v", err)
+		return bytes.Buffer{}, fmt.Errorf("failed to create reader: %v", err)
 	}
 	defer r.Close()
 
-	scanner := bufio.NewScanner(r)
-
-	var result []string
-
-	for scanner.Scan() {
-		result = append(result, scanner.Text())
+	// Read the object data into a buffer
+	buf := new(bytes.Buffer)
+	if _, err := io.Copy(buf, r); err != nil {
+		return bytes.Buffer{}, fmt.Errorf("failed to read object data: %v", err)
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("failed to read object from bucket: %v", err)
-	}
+	return *buf, nil
 
-	return result, nil
 }
 
 var (

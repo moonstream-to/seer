@@ -3,6 +3,8 @@ package storage
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"path/filepath"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -19,7 +21,7 @@ func NewS3Storage(basePath string) *S3 {
 	return &S3{BasePath: basePath}
 }
 
-func (s *S3) Save(batchDir, filename string, data []string) error {
+func (s *S3) Save(batchDir, filename string, bf bytes.Buffer) error {
 	key := filepath.Join(s.BasePath, batchDir, filename)
 
 	sess := session.Must(session.NewSession(&aws.Config{
@@ -28,25 +30,23 @@ func (s *S3) Save(batchDir, filename string, data []string) error {
 
 	svc := s3.New(sess)
 
+	// Upload the data to S3
 	_, err := svc.PutObject(&s3.PutObjectInput{
 		Bucket: aws.String("myBucket"),
 		Key:    aws.String(key),
-		Body:   bytes.NewReader([]byte(data[0])),
-
-		// Add the metadata
+		Body:   bytes.NewReader(bf.Bytes()),
 		Metadata: map[string]*string{
-			"key": aws.String(key),
+			"encoder": aws.String("default"),
 		},
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to put object to S3: %v", err)
 	}
 
 	return nil
 }
 
-func (s *S3) Read(key string) ([]string, error) {
-
+func (s *S3) Read(key string) (bytes.Buffer, error) {
 	sess := session.Must(session.NewSession(&aws.Config{
 		Region: aws.String("us-west-2"),
 	}))
@@ -59,13 +59,17 @@ func (s *S3) Read(key string) ([]string, error) {
 	})
 
 	if err != nil {
-		return nil, err
+		return bytes.Buffer{}, fmt.Errorf("failed to get object: %v", err)
+	}
+	defer result.Body.Close()
+
+	// Read the object data into a buffer
+	buf := new(bytes.Buffer)
+	if _, err := io.Copy(buf, result.Body); err != nil {
+		return bytes.Buffer{}, fmt.Errorf("failed to read object data: %v", err)
 	}
 
-	buf := new(bytes.Buffer)
-	buf.ReadFrom(result.Body)
-
-	return []string{buf.String()}, nil
+	return *buf, nil
 }
 
 func (s *S3) Delete(key string) error {

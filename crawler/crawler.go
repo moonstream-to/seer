@@ -1,7 +1,7 @@
 package crawler
 
 import (
-	"encoding/base64"
+	"bytes"
 	"fmt"
 	"log"
 	"math/big"
@@ -12,7 +12,7 @@ import (
 	seer_blockchain "github.com/moonstream-to/seer/blockchain"
 	"github.com/moonstream-to/seer/indexer"
 	"github.com/moonstream-to/seer/storage"
-	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/encoding/protodelim"
 )
 
 var CurrentBlockchainState BlockchainState
@@ -41,18 +41,19 @@ type Crawler struct {
 	Client          seer_blockchain.BlockchainClient
 	StorageInstance storage.Storer
 
-	blockchain    string
-	startBlock    int64
-	endBlock      int64
-	batchSize     int64
-	confirmations int64
-	force         bool
-	baseDir       string
-	basePath      string
+	blockchain     string
+	startBlock     int64
+	endBlock       int64
+	confirmations  int64
+	force          bool
+	baseDir        string
+	basePath       string
+	protoSizeLimit int
+	protoTimeLimit int
 }
 
 // NewCrawler creates a new crawler instance with the given blockchain handler.
-func NewCrawler(blockchain string, startBlock, endBlock, batchSize, confirmations int64, timeout int, baseDir string, force bool) (*Crawler, error) {
+func NewCrawler(blockchain string, startBlock, endBlock, confirmations int64, timeout int, baseDir string, force bool, protoSizeLimit, protoTimeLimit int) (*Crawler, error) {
 	var crawler Crawler
 
 	basePath := filepath.Join(baseDir, SeerCrawlerStoragePrefix, "data", blockchain)
@@ -72,14 +73,15 @@ func NewCrawler(blockchain string, startBlock, endBlock, batchSize, confirmation
 		Client:          client,
 		StorageInstance: storageInstance,
 
-		blockchain:    blockchain,
-		startBlock:    startBlock,
-		endBlock:      endBlock,
-		batchSize:     batchSize,
-		confirmations: confirmations,
-		force:         force,
-		baseDir:       baseDir,
-		basePath:      basePath,
+		blockchain:     blockchain,
+		startBlock:     startBlock,
+		endBlock:       endBlock,
+		confirmations:  confirmations,
+		force:          force,
+		baseDir:        baseDir,
+		basePath:       basePath,
+		protoSizeLimit: protoSizeLimit,
+		protoTimeLimit: protoTimeLimit,
 	}
 
 	return &crawler, nil
@@ -125,8 +127,20 @@ func SetDefaultStartBlock(confirmations int64, latestBlockNumber *big.Int) int64
 	return startBlock
 }
 
+type BlocksBufferBatch struct {
+	StartBlock int64
+	EndBlock   int64
+
+	Buffer bytes.Buffer
+}
+
 // Start initiates the crawling process for the configured blockchain.
 func (c *Crawler) Start(threads int) {
+	// protoBufferSizeLimit := c.protoSizeLimit * 1024 * 1024 // In Mb
+	// protoDurationTimeLimit := time.Duration(c.protoTimeLimit) * time.Minute
+
+	batchSize := int64(10)
+
 	latestBlockNumber := CurrentBlockchainState.GetLatestBlockNumber()
 	if c.force {
 		if c.startBlock == 0 {
@@ -152,7 +166,10 @@ func (c *Crawler) Start(threads int) {
 		}
 	}
 
-	tempEndBlock := c.startBlock + c.batchSize
+	// var blocksBufferBatch BlocksBufferBatch
+	// blocksBufferBatchEncoder := json.NewEncoder(&blocksBufferBatch.Buffer)
+
+	tempEndBlock := c.startBlock + batchSize
 	var safeBlock int64
 
 	retryWaitTime := 10 * time.Second
@@ -180,7 +197,7 @@ func (c *Crawler) Start(threads int) {
 
 		safeBlock = latestBlockNumber.Int64() - c.confirmations
 
-		tempEndBlock = c.startBlock + c.batchSize
+		tempEndBlock = c.startBlock + batchSize
 		if c.endBlock != 0 {
 			if c.endBlock <= tempEndBlock {
 				tempEndBlock = c.endBlock
@@ -206,66 +223,38 @@ func (c *Crawler) Start(threads int) {
 			log.Printf("Operates with batch of blocks: %s", batchDir)
 
 			// Fetch blocks with transactions
-			blocks, transactions, blockIndex, transactionIndex, blocksCache, err := seer_blockchain.CrawlBlocks(c.Client, big.NewInt(c.startBlock), big.NewInt(tempEndBlock), SEER_CRAWLER_DEBUG, threads)
-			if err != nil {
-				return fmt.Errorf("failed to crawl blocks: %w", err)
+			blocks, blocksIndex, txsIndex, eventsIndex, crawlErr := seer_blockchain.CrawlEntireBlocks(c.Client, big.NewInt(c.startBlock), big.NewInt(tempEndBlock), SEER_CRAWLER_DEBUG, threads)
+			if crawlErr != nil {
+				return fmt.Errorf("failed to crawl blocks, txs and events: %w", err)
 			}
 
-			var encodedBytesBlocks []string
+			// Save .proto data
+			var blocksBuffer bytes.Buffer
 			for _, block := range blocks {
-				bytesBlocks, err := proto.Marshal(block)
-				if err != nil {
-					return fmt.Errorf("failed to marshal proto message for blocks: %w", err)
-				}
-				// Encode the bytes to base64 for newline delimited storage
-				base64Block := base64.StdEncoding.EncodeToString(bytesBlocks)
-				encodedBytesBlocks = append(encodedBytesBlocks, base64Block)
+				protodelim.MarshalTo(&blocksBuffer, block)
 			}
-
-			if err := c.StorageInstance.Save(batchDir, "blocks.proto", encodedBytesBlocks); err != nil {
+			if err := c.StorageInstance.Save(batchDir, "data.proto", blocksBuffer); err != nil {
 				return fmt.Errorf("failed to save blocks.proto: %w", err)
 			}
-			log.Printf("Saved blocks.proto to %s", batchDir)
+			log.Printf("Saved .proto blocks with transactions and events to %s", batchDir)
 
-			var encodedBytesTransactions []string
-			for _, transaction := range transactions {
-				bytesTransaction, err := proto.Marshal(transaction)
-				if err != nil {
-					return fmt.Errorf("failed to marshal proto message for transactions: %w", err)
-				}
-				// Encode the bytes to base64 for newline delimited storage
-				base64Transaction := base64.StdEncoding.EncodeToString(bytesTransaction)
-				encodedBytesTransactions = append(encodedBytesTransactions, base64Transaction)
-			}
-
-			if err := c.StorageInstance.Save(batchDir, "transactions.proto", encodedBytesTransactions); err != nil {
-				return fmt.Errorf("failed to save transactions.proto: %w", err)
-			}
-			log.Printf("Saved transactions.proto to %s", batchDir)
-
-			updateBlockIndexFilepaths(blockIndex, c.basePath, batchDir)
-			interfaceBlockIndex := make([]interface{}, len(blockIndex))
-			for i, v := range blockIndex {
+			// Save indexes data
+			updateBlockIndexFilepaths(blocksIndex, c.basePath, batchDir)
+			interfaceBlockIndex := make([]interface{}, len(blocksIndex))
+			for i, v := range blocksIndex {
 				interfaceBlockIndex[i] = v
 			}
-
 			if err := indexer.WriteIndexesToDatabase(c.blockchain, interfaceBlockIndex, "block"); err != nil {
 				return fmt.Errorf("failed to write block index to database: %w", err)
 			}
 
-			updateTransactionIndexFilepaths(transactionIndex, c.basePath, batchDir)
-			interfaceTransactionIndex := make([]interface{}, len(transactionIndex))
-			for i, v := range transactionIndex {
+			updateTransactionIndexFilepaths(txsIndex, c.basePath, batchDir)
+			interfaceTransactionIndex := make([]interface{}, len(txsIndex))
+			for i, v := range txsIndex {
 				interfaceTransactionIndex[i] = v
 			}
-
 			if err := indexer.WriteIndexesToDatabase(c.blockchain, interfaceTransactionIndex, "transaction"); err != nil {
 				return fmt.Errorf("failed to write transaction index to database: %w", err)
-			}
-
-			events, eventsIndex, err := seer_blockchain.CrawlEvents(c.Client, big.NewInt(int64(c.startBlock)), big.NewInt(int64(tempEndBlock)), blocksCache, SEER_CRAWLER_DEBUG)
-			if err != nil {
-				return fmt.Errorf("failed to crawl events: %w", err)
 			}
 
 			UpdateEventIndexFilepaths(eventsIndex, c.basePath, batchDir)
@@ -273,26 +262,9 @@ func (c *Crawler) Start(threads int) {
 			for i, v := range eventsIndex {
 				interfaceEventsIndex[i] = v
 			}
-
 			if err := indexer.WriteIndexesToDatabase(c.blockchain, interfaceEventsIndex, "log"); err != nil {
 				return fmt.Errorf("failed to write event index to database: %w", err)
 			}
-
-			var encodedBytesEvents []string
-			for _, event := range events {
-				bytesEvent, err := proto.Marshal(event)
-				if err != nil {
-					return fmt.Errorf("failed to marshal proto message: %w", err)
-				}
-				// Encode the bytes to base64 for newline delimited storage
-				base64Event := base64.StdEncoding.EncodeToString(bytesEvent)
-				encodedBytesEvents = append(encodedBytesEvents, base64Event)
-			}
-
-			if err := c.StorageInstance.Save(batchDir, "logs.proto", encodedBytesEvents); err != nil {
-				return fmt.Errorf("failed to save logs.proto: %w", err)
-			}
-			log.Printf("Saved logs.proto to %s", batchDir)
 
 			return nil
 		})

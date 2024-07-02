@@ -66,6 +66,8 @@ type TransactionJson struct {
 
 	AccessList []AccessList `json:"accessList,omitempty"`
 	YParity    string       `json:"yParity,omitempty"`
+
+	Events []EventJson `json:"events,omitempty"`
 }
 
 type AccessList struct {
