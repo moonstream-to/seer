@@ -1,6 +1,7 @@
 package synchronizer
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -238,6 +239,7 @@ func (d *Synchronizer) SyncCycle(customerDbUriFlag string) (bool, error) {
 		return isEnd, customersErr
 	}
 
+	// Set startBlocks as latest labeled block from customers or from the blockchain if customers are not indexed yet
 	if d.startBlock == 0 {
 		var latestCustomerBlocks []uint64
 		for id, customer := range customerDBConnections {
@@ -272,11 +274,11 @@ func (d *Synchronizer) SyncCycle(customerDbUriFlag string) (bool, error) {
 			if latestErr != nil {
 				return isEnd, fmt.Errorf("failed to get latest block number: %v", latestErr)
 			}
-			d.startBlock = uint64(crawler.SetDefaultStartBlock(0, latestBlockNumber))
+			d.startBlock = uint64(crawler.SetDefaultStartBlock(0, latestBlockNumber)) - 100
 		}
 	}
 
-	// Get the latest block from indexes database
+	// Get the latest block from the indexer db
 	indexedLatestBlock, idxLatestErr := indexer.DBConnection.GetLatestDBBlockNumber(d.blockchain)
 	if idxLatestErr != nil {
 		return isEnd, idxLatestErr
@@ -296,36 +298,40 @@ func (d *Synchronizer) SyncCycle(customerDbUriFlag string) (bool, error) {
 	// 2. For each update, read the original event data from storage
 	// 3. Decode input data using ABIs
 	// 4. Write updates to the user RDS
-	tempEndBlock := d.startBlock + d.batchSize
 	var isCycleFinished bool
 	for {
-		tempEndBlock = d.startBlock + d.batchSize
 		if d.endBlock != 0 {
-			if tempEndBlock >= d.endBlock {
-				tempEndBlock = d.endBlock
+			if d.startBlock >= d.endBlock {
 				isEnd = true
 				isCycleFinished = true
-				log.Printf("End block %d almost reached", tempEndBlock)
+				log.Printf("End block %d almost reached", d.endBlock)
 			}
 		}
-		if tempEndBlock >= indexedLatestBlock {
-			tempEndBlock = indexedLatestBlock
+		if d.endBlock >= indexedLatestBlock {
 			isCycleFinished = true
-		}
-
-		if crawler.SEER_CRAWLER_DEBUG {
-			log.Printf("Syncing %d blocks from %d to %d\n", tempEndBlock-d.startBlock, d.startBlock, tempEndBlock)
 		}
 
 		// Read updates from the indexer db
 		// This function will return a list of customer updates 1 update is 1 customer
-		updates, err := indexer.DBConnection.ReadUpdates(d.blockchain, d.startBlock, tempEndBlock, customerIds)
+		lastBlockOfChank, path, updates, err := indexer.DBConnection.ReadUpdates(d.blockchain, d.startBlock, customerIds)
+
 		if err != nil {
 			return isEnd, fmt.Errorf("error reading updates: %w", err)
 		}
 
-		log.Printf("Read %d users updates from the indexer db in range of blocks %d-%d\n", len(updates), d.startBlock, tempEndBlock)
+		fmt.Println("Last block of chank: ", lastBlockOfChank)
 
+		// Read the raw data from the storage for current path
+		rawData, readErr := d.StorageInstance.Read(path)
+		if readErr != nil {
+			return isEnd, fmt.Errorf("error reading events for customers %s: %w", readErr)
+		}
+
+		if err != nil {
+			return isEnd, fmt.Errorf("error reading updates: %w", err)
+		}
+
+		log.Printf("Read %d users updates from the indexer db in range of blocks %d-%d\n", len(updates), d.startBlock, lastBlockOfChank)
 		var wg sync.WaitGroup
 
 		sem := make(chan struct{}, 5)  // Semaphore to control concurrency
@@ -333,7 +339,7 @@ func (d *Synchronizer) SyncCycle(customerDbUriFlag string) (bool, error) {
 
 		for _, update := range updates {
 			wg.Add(1)
-			go func(update indexer.CustomerUpdates) {
+			go func(update indexer.CustomerUpdates, rawData bytes.Buffer) {
 				defer wg.Done()
 
 				sem <- struct{}{} // Acquire semaphore
@@ -350,59 +356,28 @@ func (d *Synchronizer) SyncCycle(customerDbUriFlag string) (bool, error) {
 				}
 				defer conn.Release()
 
-				// Events group by path for batch reading
-				groupByPathEvents := make(map[string][]uint64)
-
-				for _, event := range update.Data.Events {
-					if _, ok := groupByPathEvents[event.Path]; !ok {
-						groupByPathEvents[event.Path] = []uint64{}
-					}
-
-					groupByPathEvents[event.Path] = append(groupByPathEvents[event.Path], event.RowID)
-				}
-
-				eventsReadMap := []storage.ReadItem{}
-
-				for path, rowIds := range groupByPathEvents {
-					eventsReadMap = append(eventsReadMap, storage.ReadItem{
-						Key:    path,
-						RowIds: rowIds,
-					})
-				}
-
 				var decodedEventsPack []indexer.EventLabel
 				var decodedTransactionsPack []indexer.TransactionLabel
 
-				for _, item := range eventsReadMap {
-					if crawler.SEER_CRAWLER_DEBUG {
-						log.Printf("Key: %s", item.Key)
-					}
-
-					// Read events from storage
-					rawData, readErr := d.StorageInstance.Read(item.Key)
-					if readErr != nil {
-						errChan <- fmt.Errorf("error reading events for customer %s: %w", update.CustomerID, readErr)
-						return
-					}
-
-					// Decode the events using ABIs
-
-					// decodedEvents, decodedTransactions, decErr
-					decodedEvents, decodedTransactions, decErr := d.Client.DecodeProtoEntireBlockToLabels(&rawData, update.BlocksCache, update.Abis)
-					if decErr != nil {
-						fmt.Println("Error decoding events: ", decErr)
-						errChan <- fmt.Errorf("error decoding events for customer %s: %w", update.CustomerID, decErr)
-						return
-					}
-
-					decodedEventsPack = append(decodedEventsPack, decodedEvents...)
-					decodedTransactionsPack = append(decodedTransactionsPack, decodedTransactions...)
+				if crawler.SEER_CRAWLER_DEBUG {
+					log.Printf("Key: %s", update.Path)
 				}
+
+				// decodedEvents, decodedTransactions, decErr
+				decodedEvents, decodedTransactions, decErr := d.Client.DecodeProtoEntireBlockToLabels(&rawData, update.Abis)
+				if decErr != nil {
+					fmt.Println("Error decoding events: ", decErr)
+					errChan <- fmt.Errorf("error decoding events for customer %s: %w", update.CustomerID, decErr)
+					return
+				}
+
+				decodedEventsPack = append(decodedEventsPack, decodedEvents...)
+				decodedTransactionsPack = append(decodedTransactionsPack, decodedTransactions...)
 
 				customer.Pgx.WriteLabes(d.blockchain, decodedTransactionsPack, decodedEventsPack)
 
 				<-sem
-			}(update)
+			}(update, rawData)
 		}
 
 		wg.Wait()
@@ -418,7 +393,7 @@ func (d *Synchronizer) SyncCycle(customerDbUriFlag string) (bool, error) {
 			}
 		}
 
-		d.startBlock = tempEndBlock + 1
+		d.startBlock = lastBlockOfChank + 1
 
 		if isCycleFinished {
 			break

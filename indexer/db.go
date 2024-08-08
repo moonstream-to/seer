@@ -3,7 +3,6 @@ package indexer
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"log"
 	"strconv"
@@ -773,63 +772,39 @@ func (p *PostgreSQLpgx) GetCustomersIDs(blockchain string) ([]string, error) {
 	return customerIds, nil
 }
 
-func (p *PostgreSQLpgx) ReadUpdates(blockchain string, fromBlock uint64, toBlock uint64, customerIds []string) ([]CustomerUpdates, error) {
+func (p *PostgreSQLpgx) ReadUpdates(blockchain string, fromBlock uint64, customerIds []string) (uint64, string, []CustomerUpdates, error) {
 
 	pool := p.GetPool()
 
 	conn, err := pool.Acquire(context.Background())
 
 	if err != nil {
-		return nil, err
+		return 0, "", nil, err
 	}
 
 	defer conn.Release()
 
-	transactionsTableName := TransactionsTableName(blockchain)
-
-	logsTableName := LogsTableName(blockchain)
-
 	blocksTableName := BlocksTableName(blockchain)
 
-	query := fmt.Sprintf(`WITH blocks as (
+	query := fmt.Sprintf(`WITH path as (
         SELECT
-            block_number,
-            block_hash,
-            block_timestamp
+            path
         from
             %s
         WHERE
-            block_number >= $1
-            and block_number <= $2
+            block_number = $1
     ),
-    transactions AS (
-        SELECT
-            bk.block_number,
-            bk.block_hash,
-            bk.block_timestamp,
-            tx.hash AS transaction_hash,
-            tx.to_address AS transaction_address,
-            tx.selector AS transaction_selector,
-            tx.row_id AS transaction_row_id,
-            tx.path AS transaction_path
-        FROM
-            blocks bk
-            LEFT JOIN %s tx ON tx.block_hash = bk.block_hash
-    ),
-    events AS (
-        SELECT
-            bk.block_number,
-            bk.block_hash,
-            bk.block_timestamp,
-            logs.transaction_hash AS transaction_hash,
-            logs.address AS event_address,
-            logs.selector AS event_selector,
-            logs.row_id AS event_row_id,
-            logs.path AS event_path
-        FROM
-            blocks bk
-            LEFT JOIN %s logs ON logs.block_hash = bk.block_hash
-    ),
+	lates_block as (
+		SELECT
+			block_number as block_number,
+			path as path
+		from
+			%s
+		WHERE
+			path = (SELECT path from path)
+		order by block_number desc
+		limit 1
+	),
     jobs AS (
         SELECT
             address as address,
@@ -843,7 +818,7 @@ func (p *PostgreSQLpgx) ReadUpdates(blockchain string, fromBlock uint64, toBlock
         FROM
             abi_jobs
         WHERE
-            chain = $3
+            chain = $2
     ),
     address_abis AS (
         SELECT
@@ -872,198 +847,67 @@ func (p *PostgreSQLpgx) ReadUpdates(blockchain string, fromBlock uint64, toBlock
             address_abis
         GROUP BY
             customer_id
-    ),
-    abi_transactions AS (
-        SELECT
-            transactions.block_number,
-            transactions.block_timestamp,
-            jobs.customer_id,
-            jobs.abi_name,
-            jobs.address_str,
-            transactions.transaction_hash,
-            transactions.transaction_address,
-            transactions.transaction_selector,
-            transactions.transaction_row_id,
-            transactions.transaction_path
-        FROM
-            transactions
-            inner JOIN jobs ON abi_type = 'function'
-			AND abi_stateMutability != 'view'
-			AND transactions.transaction_address = jobs.address
-            AND transactions.transaction_selector = jobs.abi_selector
-    ),
-    abi_events AS (
-        SELECT
-            events.block_number,
-            events.block_timestamp,
-            jobs.customer_id,
-            jobs.abi_name,
-            jobs.address_str,
-            events.transaction_hash,
-            events.block_hash,
-            events.event_address,
-            events.event_selector,
-            events.event_row_id,
-            events.event_path
-        FROM
-            events
-            inner JOIN jobs ON abi_type = 'event' 
-			AND events.event_address = jobs.address
-            AND events.event_selector = jobs.abi_selector
-    ),
-    combined AS (
-        SELECT
-            block_number,
-            block_timestamp,
-            customer_id,
-            'transaction' AS type,
-            abi_name,
-            address_str,
-            transaction_hash AS hash,
-            transaction_address AS address,
-            transaction_selector AS selector,
-            transaction_row_id AS row_id,
-            transaction_path AS path
-        FROM
-            abi_transactions
-        UNION
-        ALL
-        SELECT
-            block_number,
-            block_timestamp,
-            customer_id,
-            'event' AS type,
-            abi_name,
-            address_str,
-            transaction_hash AS hash,
-            event_address AS address,
-            event_selector AS selector,
-            event_row_id AS row_id,
-            event_path AS path
-        FROM
-            abi_events
     )
-    SELECT
-        customer_id,
-        (
-            SELECT
-                abis
-            from
-                reformatted_jobs
-            where
-                reformatted_jobs.customer_id = combined.customer_id
-        ) as abis,
-        json_object_agg(block_number, block_timestamp) AS blocks_cache,
-        json_build_object(
-            'transactions',
-            COALESCE(
-                json_agg(
-                    json_build_object(
-                        'hash',
-                        hash,
-                        'address',
-                        address_str,
-                        'selector',
-                        selector,
-                        'row_id',
-                        row_id,
-                        'path',
-                        path
-                    )
-                ) FILTER (
-                    WHERE
-                        type = 'transaction'
-                ),
-                '[]'
-            ),
-            'events',
-            COALESCE(
-                json_agg(
-                    CASE
-                        WHEN type = 'event' THEN json_build_object(
-                            'hash',
-                            hash,
-                            'address',
-                            address_str,
-                            'selector',
-                            selector,
-                            'row_id',
-                            row_id,
-                            'path',
-                            path
-                        )
-                    END
-                ) FILTER (
-                    WHERE
-                        type = 'event'
-                ),
-                '[]'
-            )
-        ) AS data
-    FROM
-        combined
-    GROUP BY
-        customer_id`, blocksTableName, transactionsTableName, logsTableName)
+	SELECT
+    	block_number,
+    	path,
+    	(SELECT json_agg(json_build_object(customer_id, abis)) FROM reformatted_jobs) as jobs
+	FROM
+    	lates_block
+	`, blocksTableName, blocksTableName)
 
-	rows, err := conn.Query(context.Background(), query, fromBlock, toBlock, blockchain)
+	rows, err := conn.Query(context.Background(), query, fromBlock, blockchain)
 
 	if err != nil {
 		log.Println("Error querying abi jobs from database", err)
-		return nil, err
+		return 0, "", nil, err
 	}
 
-	var result []CustomerUpdates
+	var customers []map[string]map[string]map[string]map[string]string
+	var path string
+	var lastNumber uint64
 
 	for rows.Next() {
-		var customerId string
-		var abisJSON, blocksCacheJSON, dataJSON []byte
 
 		// Scan the current row's columns into the variables
-		err = rows.Scan(&customerId, &abisJSON, &blocksCacheJSON, &dataJSON)
-
-		var abis map[string]map[string]map[string]string
-		if err := json.Unmarshal(abisJSON, &abis); err != nil {
-			log.Println("Error unmarshalling abis:", err)
-			continue
-		}
-
-		var blocksCache map[string]uint64
-		if err := json.Unmarshal(blocksCacheJSON, &blocksCache); err != nil {
-			log.Println("Error unmarshalling blocks cache:", err)
-			continue
-		}
-
-		var data RawChainData
-		if err := json.Unmarshal(dataJSON, &data); err != nil {
-			log.Println("Error unmarshalling data:", err)
-			continue
-		}
+		err = rows.Scan(&lastNumber, &path, &customers)
 
 		if err != nil {
 			log.Println("Error scanning row:", err)
-			continue
+			return 0, "", nil, err
 		}
-
-		transformedBlocksCache := make(map[uint64]uint64)
-		for key, value := range blocksCache {
-			uintKey, err := strconv.ParseUint(key, 10, 64)
-			if err != nil {
-				fmt.Println("Error converting key:", err)
-				continue
-			}
-			transformedBlocksCache[uintKey] = value
-		}
-
-		// Append the JSON data to the slice
-		result = append(result, CustomerUpdates{
-			CustomerID:  customerId,
-			Abis:        abis,
-			BlocksCache: transformedBlocksCache,
-			Data:        data,
-		})
 	}
 
-	return result, nil
+	var customerUpdates []CustomerUpdates
+
+	for _, customerUpdate := range customers {
+
+		// fmt.Println("Customer ID:", customerid)
+		// fmt.Println("Raw ABIs:", raw_abis)
+
+		for customerid, abis := range customerUpdate {
+
+			customerUpdates = append(customerUpdates, CustomerUpdates{
+				CustomerID: customerid,
+				Abis:       abis,
+			})
+
+		}
+
+		// var abis map[string]map[string]map[string]string
+		// if err := json.Unmarshal(bytes.NewBufferString(raw_abis).Bytes(), &abis); err != nil {
+		// 	log.Println("Error unmarshalling abis:", err)
+		// 	continue
+		// }
+
+		// customerUpdates = append(customerUpdates, CustomerUpdates{
+		// 	CustomerID: string(customerid),
+		// 	Abis:       abis,
+		// })
+
+	}
+
+	return lastNumber, path, customerUpdates, nil
 
 }
 

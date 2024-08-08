@@ -138,10 +138,10 @@ type AbiJob struct {
 }
 
 type CustomerUpdates struct {
-	CustomerID  string                                  `json:"customer_id"`
-	Abis        map[string]map[string]map[string]string `json:"abis"`
-	BlocksCache map[uint64]uint64                       `json:"blocks_cache"`
-	Data        RawChainData                            `json:"data"`
+	CustomerID string                                  `json:"customer_id"`
+	Abis       map[string]map[string]map[string]string `json:"abis"`
+	LastBlock  uint64                                  `json:"last_block"`
+	Path       string                                  `json:"path"`
 }
 
 type TaskForTransaction struct {

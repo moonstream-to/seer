@@ -674,7 +674,7 @@ func (c *Client) DecodeProtoEntireBlockToJson(rawData *bytes.Buffer) (*seer_comm
 	return blocksBatchJson, nil
 }
 
-func (c *Client) DecodeProtoEntireBlockToLabels(rawData *bytes.Buffer, blocksCache map[uint64]uint64, abiMap map[string]map[string]map[string]string) ([]indexer.EventLabel, []indexer.TransactionLabel, error) {
+func (c *Client) DecodeProtoEntireBlockToLabels(rawData *bytes.Buffer, abiMap map[string]map[string]map[string]string) ([]indexer.EventLabel, []indexer.TransactionLabel, error) {
 	var protoBlocksBatch PolygonBlocksBatch
 
 	dataBytes := rawData.Bytes()
