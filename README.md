@@ -1,7 +1,28 @@
 # seer
 
-`seer` is blockchain-adjacent tooling for crawling data and performing
-smart contract interactions.
+`seer` is blockchain-adjacent tooling for crawling data and performing smart contract interactions. It has three main functions: 
+1. Generating a smart contract interface
+2. Crawling and indexing blockchain data
+3. Checking for corrupted data in database/storage of crawled blocks
+
+### Prerequisites 
+
+[Go](https://go.dev/) (version >= 1.21)
+
+To install `seer`:
+```bash
+go install https://github.com/G7DAO/seer@latest
+```
+## 1. Generating a smart contract interface
+
+`seer` simplifies interactions with deployed smart contracts by generating a golang interface. It lets you access contract functions (like balance checks or transactions) through a command-line interface (CLI), instead of using web-based blockchain explorers like Etherscan.
+
+`seer` also lets you use pre-saved CLI commands from .md files for faster interaction with smart contracts.
+It helps quickly develop auto generated scripts for interacting with contracts, saving you from writing complex custom scripts every time you need to interact with the blockchain (e.g., deploying, checking balances, transferring funds).
+
+It doesn’t come with pre-written scripts. You need to generate your own scripts using `seer`, following examples in this README.
+
+You can use [`Makefile`](./Makefile) as an example. It is recommended to have a makefile that contains the `seer evm generate` commands for each of your smart contracts.
 
 ## Build
 
@@ -57,6 +78,29 @@ seer evm generate \
 4. `$GO_STRUCT_NAME` should be the name of the struct that you would like to represent an instance of the contract with the given ABI.
 
 If you want to write the output to a file, you can use the `--output` argument to do so. Or shell redirections.
+
+#### Example: how to use a go binding as a CLI
+
+Generating an ERC20 go binding:
+1. Initialize it as a go package. It’s important to have the main package included (`--includemain flag`) to create a standalone CLI for a contract. This will generate a go .mod file.
+```bash
+go mod init ERC20
+```
+
+2. You can now install all the dependencies. To install every module from our package and generate a go.sum file: 
+```bash
+go mod tidy
+```
+
+3. Now to generate a CLI file (ERC20 file without an extension) you can use 
+```bash
+go build .
+```
+ 
+4. To see all the go bindings functions that are analogous to the contract and can be called directly from the CLI use
+```bash
+ ./ERC20 -h
+```
 
 #### Example: `OwnableERC721`
 
@@ -154,9 +198,9 @@ Flags:
       --value string                      Value to send with the transaction
 ```
 
-# Crawler
+## 2. Crawling and indexing blockchain data
 
-That part of seer responsible for crawling raw blocks,tx_calls and events from the blockchain.
+This part of `seer` is responsible for crawling raw blocks,tx_calls and events from the blockchain.
 
 List of supported blockchains:
 
@@ -220,7 +264,7 @@ protoc --go_out=. --go_opt=paths=source_relative \
 ```
 
 2. Rename generated file similar to chain package.
-3. Generate interface with seer, if chain is L2, specify flag `--side-chain`:
+3. Generate interface with `seer`, if chain is L2, specify flag `--side-chain`:
 
 ```bash
 ./seer blockchain generate -n ethereum
@@ -239,11 +283,93 @@ Before running the crawler, you need initialize the database with the following 
 ```bash
 ./seer crawler --chain polygon --start-block 53922484 --force
 ```
+```
+Usage:
+  seer crawler [flags]
 
-## Inspect database
+Flags:
+      --base-dir string         The base directory to store the crawled data
+      --batch-size int          Dynamically changed maximum number of blocks to crawl in each batch (default 10)
+      --chain string            The blockchain to crawl (default "ethereum")
+      --confirmations int       The number of confirmations to consider for block finality (default 10)
+      --final-block int         The block number to end crawling at
+  -h, --help                    help for crawler
+      --proto-size-limit uint   Proto file size limit in Mb (default 25)
+      --proto-time-limit int    Proto time limit in seconds (default 300)
+      --retry-multiplier int    Multiply wait time to get max waiting time before fetch new block (default 24)
+      --retry-wait int          The wait time for the crawler in milliseconds before it try to fetch new block (default 5000)
+      --start-block int         The block number to start crawling from (default: fetch from database, if it is empty, run from latestBlockNumber minus shift)
+      --threads int             Number of go-routines for concurrent crawling (default 1)
+      --timeout int             The timeout for the crawler in seconds (default 30)
+```
+
+Crawler command:
+
+By setup --chain [ethreum, polygon,etc..] all available chains defined in **blockchain** folder.
+`Proto files definitions and client interfaces is required` (command `seer blockchain generate -n $BLOCKCHAIN --side-chain` for generate them)
+
+
+ You will run indexing of raw blockchain data 
+depends on env var **SEER_CRAWLER_STORAGE_TYPE** to `["gcp-storage","filesystem"]` you will set where that data will be save on your local storage on in GCS.
+Option "gcp-storage" required google credential setup on system or by variable **MOONSTREAM_STORAGE_GCP_SERVICE_ACCOUNT_CREDS_PATH**.
+
+SET **SEER_CRAWLER_STORAGE_TYPE** to "filesystem"
+
+run of crawler 
+```
+seer crawler ---cahin polygon
+```
+
+That will start create batch of blocks ranges indexed raw blocks/transactions/events data from blockchain.
+
+```
+dev
+   /data
+      /polygon
+             /59193672-59193737:
+                 - data.proto
+             /59193738-59193781
+                 - data.proto
+```
+
+All data in files in proto message format defined in `/seer/blockchain/<chain_name>/<chain_name>.proto`
+
+
+## 3. Checking for corrupted data in database/storage of crawled blocks
 
 Find first and last blocks indexed in database and verify it's batch at storage:
 
 ```bash
 ./seer inspector db --chain polygon --storage-verify
 ```
+
+You can look into the crawled data directly using inspector
+
+`seer inspector`
+
+Inspect storage and database consistency
+
+Usage:
+  seer inspector [command]
+
+Available Commands:
+  - **db**          Inspect database consistency
+  - **read**        Read and decode indexed proto data from storage
+  - **storage**     Inspect filesystem, gcp-storage, aws-bucket consistency
+
+
+`seer inspector read`
+
+For see batch of 59193672-59193737 data in console run
+
+```
+seer inspector read --chain polygon --batch 59193738-59193781
+```
+Output
+```
+All blocks data of that batch
+```
+
+`seer inspector db`
+
+`seer inspector storage`
